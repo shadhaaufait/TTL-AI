@@ -83,6 +83,7 @@ def product_summary():
 # ---------------- AI Insights API -----------------
 @app.get("/ai-insights")
 def ai_insights():
+    print("🚀 Generating AI Insights...")
     return generate_ai_insights(df)
 
 
@@ -137,33 +138,8 @@ def kpi_all():
         if expected_revenue > 0 else 0,
     }
 
-    # ---------------------- 3. TIME KPIs ----------------------
-    if "CreatedDate" in df_local:
-        df_local["CreatedDate"] = pd.to_datetime(df_local["CreatedDate"], errors="coerce")
-    if "CloseDate" in df_local:
-        df_local["CloseDate"] = pd.to_datetime(df_local["CloseDate"], errors="coerce")
-
-    # Sales cycle
-    if "CreatedDate" in df_local and "CloseDate" in df_local:
-        df_local["sales_cycle"] = (df_local["CloseDate"] - df_local["CreatedDate"]).dt.days
-        avg_cycle = df_local["sales_cycle"].mean()
-    else:
-        avg_cycle = None
-
-    result["time"] = {
-        "avg_sales_cycle_days": round(avg_cycle, 2) if avg_cycle else None,
-    }
-
-    # Monthly revenue
-    if "CloseDate" in df_local:
-        df_local["month"] = df_local["CloseDate"].dt.to_period("M")
-        monthly_revenue = (
-            df_local.groupby("month")["AmountINR__c"]
-            .sum()
-            .reset_index()
-            .rename(columns={"AmountINR__c": "revenue"})
-        )
-        result["time"]["monthly_revenue"] = monthly_revenue.to_dict(orient="records")
+    # ---------------------- 3. TIME KPIs (REMOVED DATE STUFF) ----------------------
+    result["time"] = {}  # keep structure empty
 
     # ---------------------- 4. CUSTOMER KPIs ----------------------
     if "Account_Name__c" in df_local:
