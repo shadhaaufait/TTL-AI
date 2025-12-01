@@ -87,60 +87,155 @@ def ai_insights():
 
 
 # ---------------- Advanced KPI API ----------------
-@app.get("/kpi-advanced")
-def kpi_advanced():
-    response = {}
+@app.get("/kpi-all")
+def kpi_all():
+    result = {}
 
-    total_orders = len(df)
-    won = len(df[df["StageName"] == "ORDER WON"])
-    lost = len(df[df["StageName"] == "ORDER LOST"])
-    total_revenue = df["Total_Amount__c"].sum() if "Total_Amount__c" in df else 0
+    df_local = df.copy()
 
-    response["total_orders"] = int(total_orders)
-    response["won"] = int(won)
-    response["lost"] = int(lost)
-    response["total_revenue"] = float(total_revenue)
+    # Ensure numeric fields
+    numeric_cols = ["AmountINR__c", "Won_Amount__c", "ExpectedRevenue"]
+    for col in numeric_cols:
+        if col in df_local:
+            df_local[col] = pd.to_numeric(df_local[col], errors="coerce").fillna(0)
 
-    response["win_rate"] = round((won / (won + lost) * 100), 2) if (won + lost) else 0
+    # ---------------------- 1. VOLUME KPIs ----------------------
+    total_opportunities = len(df_local)
+    total_won = len(df_local[df_local["StageName"] == "ORDER WON"])
+    total_lost = len(df_local[df_local["StageName"] == "ORDER LOST"])
 
-    response["avg_deal_size"] = (
-        round(total_revenue / total_orders, 2) if total_orders > 0 else 0
-    )
+    result["volume"] = {
+        "total_opportunities": int(total_opportunities),
+        "total_won": int(total_won),
+        "total_lost": int(total_lost),
+        "win_rate": round((total_won / (total_won + total_lost) * 100), 2)
+        if (total_won + total_lost) > 0 else 0,
+        "lost_rate": round((total_lost / total_opportunities * 100), 2)
+        if total_opportunities > 0 else 0,
+        "open_opportunities": int(total_opportunities - total_won - total_lost),
+        "unique_customers": df_local["Account_Name__c"].nunique()
+        if "Account_Name__c" in df_local else None,
+    }
 
-    # Win rate by product
-    if "Product_Type__c" in df:
-        product_win = (
-            df[df["StageName"] == "ORDER WON"]
-            .groupby("Product_Type__c")["StageName"]
-            .count()
+    # ---------------------- 2. FINANCIAL KPIs ----------------------
+    total_order_value = df_local["AmountINR__c"].sum()
+    won_order_value = df_local["Won_Amount__c"].sum()
+    lost_order_value = df_local[df_local["StageName"] == "ORDER LOST"]["AmountINR__c"].sum()
+    expected_revenue = df_local["ExpectedRevenue"].sum()
+
+    result["financials"] = {
+        "total_order_value": float(total_order_value),
+        "won_order_value": float(won_order_value),
+        "lost_order_value": float(lost_order_value),
+        "avg_deal_size": round(total_order_value / total_opportunities, 2)
+        if total_opportunities > 0 else 0,
+        "avg_won_deal_size": round(won_order_value / total_won, 2)
+        if total_won > 0 else 0,
+        "expected_revenue": float(expected_revenue),
+        "expected_vs_actual": float(won_order_value - expected_revenue),
+        "revenue_realization_rate": round((won_order_value / expected_revenue * 100), 2)
+        if expected_revenue > 0 else 0,
+    }
+
+    # ---------------------- 3. TIME KPIs ----------------------
+    if "CreatedDate" in df_local:
+        df_local["CreatedDate"] = pd.to_datetime(df_local["CreatedDate"], errors="coerce")
+    if "CloseDate" in df_local:
+        df_local["CloseDate"] = pd.to_datetime(df_local["CloseDate"], errors="coerce")
+
+    # Sales cycle
+    if "CreatedDate" in df_local and "CloseDate" in df_local:
+        df_local["sales_cycle"] = (df_local["CloseDate"] - df_local["CreatedDate"]).dt.days
+        avg_cycle = df_local["sales_cycle"].mean()
+    else:
+        avg_cycle = None
+
+    result["time"] = {
+        "avg_sales_cycle_days": round(avg_cycle, 2) if avg_cycle else None,
+    }
+
+    # Monthly revenue
+    if "CloseDate" in df_local:
+        df_local["month"] = df_local["CloseDate"].dt.to_period("M")
+        monthly_revenue = (
+            df_local.groupby("month")["AmountINR__c"]
+            .sum()
+            .reset_index()
+            .rename(columns={"AmountINR__c": "revenue"})
         )
-        product_total = df.groupby("Product_Type__c")["StageName"].count()
+        result["time"]["monthly_revenue"] = monthly_revenue.to_dict(orient="records")
 
-        response["win_rate_by_product"] = (
-            (product_win / product_total * 100)
-            .fillna(0)
-            .round(2)
+    # ---------------------- 4. CUSTOMER KPIs ----------------------
+    if "Account_Name__c" in df_local:
+        customer_revenue = (
+            df_local.groupby("Account_Name__c")["AmountINR__c"].sum()
+            .sort_values(ascending=False)
+            .head(10)
+        )
+
+        result["customer"] = {
+            "top_customers": customer_revenue.to_dict(),
+            "customer_revenue_share": (
+                (customer_revenue / total_order_value * 100).round(2).to_dict()
+                if total_order_value > 0 else {}
+            ),
+        }
+    else:
+        result["customer"] = {}
+
+    # ---------------------- 5. PRODUCT & REGION KPIs ----------------------
+    product_kpi = {}
+    region_kpi = {}
+
+    if "Product_Type__c" in df_local:
+        product_kpi["product_revenue_share"] = (
+            df_local.groupby("Product_Type__c")["AmountINR__c"]
+            .sum()
+            .to_dict()
+        )
+        product_kpi["product_wise_orders"] = (
+            df_local.groupby("Product_Type__c")["StageName"]
+            .count()
             .to_dict()
         )
 
-    # Lost reasons
-    if "Reason_for_Loss__c" in df:
-        response["lost_reason_summary"] = (
-            df[df["StageName"] == "ORDER LOST"]["Reason_for_Loss__c"]
+    if "Billing_State__c" in df_local:
+        region_kpi["region_revenue_share"] = (
+            df_local.groupby("Billing_State__c")["AmountINR__c"]
+            .sum()
+            .to_dict()
+        )
+
+    result["product_region"] = {
+        "product": product_kpi,
+        "region": region_kpi
+    }
+
+    # ---------------------- 6. LOSS ANALYSIS ----------------------
+    if "Reason_for_Loss__c" in df_local:
+        loss_reasons = (
+            df_local[df_local["StageName"] == "ORDER LOST"]["Reason_for_Loss__c"]
             .value_counts()
             .to_dict()
         )
+    else:
+        loss_reasons = {}
 
-    # Sales cycle
-    if "CreatedDate" in df and "CloseDate" in df:
-        df["CreatedDate"] = pd.to_datetime(df["CreatedDate"], errors="coerce")
-        df["CloseDate"] = pd.to_datetime(df["CloseDate"], errors="coerce")
+    result["loss_analysis"] = {
+        "lost_value": float(lost_order_value),
+        "loss_value_percent": round((lost_order_value / total_order_value * 100), 2)
+        if total_order_value > 0 else 0,
+        "top_loss_reasons": loss_reasons,
+    }
 
-        df["sales_cycle"] = (df["CloseDate"] - df["CreatedDate"]).dt.days
-        avg_cycle = df["sales_cycle"].mean()
+    # ---------------------- 7. PAYMENT KPIs ----------------------
+    if "Advance_Received__c" in df_local:
+        total_advance_received = df_local["Advance_Received__c"].sum()
+    else:
+        total_advance_received = 0
 
-        response["avg_sales_cycle_days"] = (
-            round(avg_cycle, 2) if not pd.isna(avg_cycle) else None
-        )
+    result["payment"] = {
+        "total_advance_received": float(total_advance_received),
+    }
 
-    return response
+    return result
